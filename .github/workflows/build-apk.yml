@@ -1,0 +1,69 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Extract Android project
+        run: |
+          echo "ZIP files:"
+          ls -la
+
+          unzip -q Psyktikos_v1_0_FINAL_project.zip -d extracted
+
+          echo "Searching for Gradle project..."
+          find extracted -type f \( -name "gradlew" -o -name "settings.gradle" -o -name "settings.gradle.kts" \) -print
+
+      - name: Find Gradle project
+        run: |
+          PROJECT_DIR=$(find extracted -type f -name "gradlew" -print -quit | xargs -r dirname)
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: gradlew was not found."
+            echo "Repository contents:"
+            find extracted -maxdepth 8 -type f | sort
+            exit 1
+          fi
+
+          echo "Gradle project found:"
+          echo "$PROJECT_DIR"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Make Gradle executable
+        run: |
+          chmod +x "$PROJECT_DIR/gradlew"
+
+      - name: Build Debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          ./gradlew assembleDebug --stacktrace
+
+      - name: Show generated APK
+        run: |
+          echo "Generated APK:"
+          find "$PROJECT_DIR" -type f -name "*.apk" -print
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Psyktikos-v1.0-APK
+          path: |
+            extracted/**/build/outputs/apk/**/*.apk
+          if-no-files-found: error
