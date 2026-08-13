@@ -1,0 +1,193 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Prepare project
+        shell: bash
+        run: |
+          set -e
+
+          echo "=== Repository contents ==="
+          find . -maxdepth 3 -type f | sort
+
+          rm -rf extracted
+          mkdir -p extracted
+
+          ZIP_FILE=$(find . -maxdepth 2 -type f -name "*.zip" -print -quit)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERROR: ZIP project not found."
+            exit 1
+          fi
+
+          echo "ZIP: $ZIP_FILE"
+
+          unzip -q "$ZIP_FILE" -d extracted
+
+          echo "=== Extracted project ==="
+          find extracted -maxdepth 5 -type f | sort
+
+          PROJECT_DIR=$(find extracted \
+            -type f \
+            \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+            -print -quit | xargs -r dirname)
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: settings.gradle or settings.gradle.kts not found."
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Verify Android project
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "=== Project root ==="
+          pwd
+
+          echo "=== Project files ==="
+          find . -maxdepth 3 -type f | sort
+
+          if [ ! -f "settings.gradle" ] && [ ! -f "settings.gradle.kts" ]; then
+            echo "ERROR: Gradle settings file missing."
+            exit 1
+          fi
+
+          if [ ! -f "gradlew" ]; then
+            echo "ERROR: gradlew not found."
+            exit 1
+          fi
+
+          chmod +x gradlew
+
+      - name: Configure Gradle properties
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.enableJetifier=true
+          kotlin.code.style=official
+          EOF
+
+          echo "=== gradle.properties ==="
+          cat gradle.properties
+
+      - name: Check Java and Gradle
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "=== Java ==="
+          java -version
+
+          echo "=== Gradle ==="
+          ./gradlew --version
+
+      - name: Clean previous build
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "=== Cleaning old build ==="
+
+          ./gradlew clean \
+            --no-daemon \
+            --stacktrace
+
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "=== Building Debug APK ==="
+
+          ./gradlew assembleDebug \
+            --no-daemon \
+            --stacktrace
+
+      - name: Locate APK
+        shell: bash
+        run: |
+          set -e
+
+          echo "=== Searching for APK ==="
+
+          find "$PROJECT_DIR" \
+            -type f \
+            -name "*.apk" \
+            -print
+
+          APK=$(find "$PROJECT_DIR" \
+            -type f \
+            -path "*/build/outputs/apk/debug/*.apk" \
+            -print -quit)
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not generated."
+            exit 1
+          fi
+
+          echo "Found APK:"
+          echo "$APK"
+
+          echo "APK=$APK" >> "$GITHUB_ENV"
+
+      - name: Rename APK
+        shell: bash
+        run: |
+          set -e
+
+          NEW_APK="$PROJECT_DIR/Psyktikos_v1_0_FINAL.apk"
+
+          cp "$APK" "$NEW_APK"
+
+          echo "Final APK:"
+          ls -lh "$NEW_APK"
+
+          echo "FINAL_APK=$NEW_APK" >> "$GITHUB_ENV"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Psyktikos_v1_0_FINAL_APK
+          path: ${{ env.FINAL_APK }}
+          if-no-files-found: error
