@@ -1,3 +1,4 @@
+
 name: Build Psyktikos APK
 
 on:
@@ -19,30 +20,52 @@ jobs:
           mkdir -p project
           unzip -q Psyktikos_v1_0_FINAL_project.zip -d project
 
+      - name: Inspect project structure
+        run: |
+          echo "=== PROJECT FILES ==="
+          find project -maxdepth 5 -type f | sort
+          echo "=== GRADLE FILES ==="
+          find project -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" -o -name "build.gradle" -o -name "build.gradle.kts" -o -name "gradlew" \) | sort
+
       - name: Find Android project
         run: |
-          GRADLEW=$(find project -type f -name gradlew | head -n 1)
-          if [ -z "$GRADLEW" ]; then
-            echo "ERROR: gradlew was not found."
-            find project -maxdepth 4 -type f | head -100
+          SETTINGS=$(find project -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) | head -n 1)
+
+          if [ -z "$SETTINGS" ]; then
+            echo "ERROR: No Android Gradle project found."
+            echo "The ZIP contents are shown above."
             exit 1
           fi
-          PROJECT_DIR=$(dirname "$GRADLEW")
+
+          PROJECT_DIR=$(dirname "$SETTINGS")
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Found project at: $PROJECT_DIR"
+          echo "Android project found at: $PROJECT_DIR"
 
-      - name: Make Gradle executable
-        run: chmod +x "$PROJECT_DIR/gradlew"
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10'
 
-      - name: Build Debug APK
+      - name: Build APK
         run: |
           cd "$PROJECT_DIR"
-          ./gradlew assembleDebug --stacktrace
+
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            ./gradlew assembleDebug --stacktrace
+          else
+            gradle assembleDebug --stacktrace
+          fi
+
+      - name: Find APK
+        run: |
+          echo "=== APK FILES ==="
+          find "$PROJECT_DIR" -type f -name "*.apk" -print
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Psyktikos-v1.0-APK
           path: |
-            ${{ env.PROJECT_DIR }}/app/build/outputs/apk/**/*.apk
+            ${{ env.PROJECT_DIR }}/**/build/outputs/apk/**/*.apk
           if-no-files-found: error
