@@ -1,0 +1,70 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Build Psyktikos v1.0 FINAL
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Find Gradle wrapper
+        run: |
+          set -e
+          echo "=== Repository ==="
+          pwd
+          find . -maxdepth 5 -type f \( -name "gradlew" -o -name "gradlew.bat" -o -name "settings.gradle" -o -name "settings.gradle.kts" \) -print
+
+      - name: Make gradlew executable
+        run: |
+          set -e
+          GRADLEW="$(find . -type f -name gradlew -print -quit)"
+
+          if [ -z "$GRADLEW" ]; then
+            echo "ERROR: gradlew was not found."
+            exit 1
+          fi
+
+          chmod +x "$GRADLEW"
+          echo "Using: $GRADLEW"
+
+      - name: Build APK
+        run: |
+          set -e
+
+          GRADLEW="$(find . -type f -name gradlew -print -quit)"
+
+          if [ -z "$GRADLEW" ]; then
+            echo "ERROR: gradlew was not found."
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$GRADLEW")"
+
+          echo "=== Building Psyktikos v1.0 FINAL ==="
+          echo "Project directory: $PROJECT_DIR"
+
+          cd "$PROJECT_DIR"
+
+          ./gradlew clean assembleDebug --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Psyktikos-v1.0-FINAL-APK
+          path: '**/build/outputs/apk/debug/*.apk'
+          if-no-files-found: error
