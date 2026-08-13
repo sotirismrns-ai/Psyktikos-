@@ -1,0 +1,186 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Install Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Prepare Android project
+        shell: bash
+        run: |
+          set -e
+
+          echo "=== Repository ==="
+          find . -maxdepth 3 -type f | sort
+
+          PROJECT_DIR=""
+
+          # Case 1: project already exists at repository root
+          if [ -f "./settings.gradle" ] && [ -f "./build.gradle" ]; then
+            PROJECT_DIR="."
+          elif [ -f "./settings.gradle.kts" ] && [ -f "./build.gradle.kts" ]; then
+            PROJECT_DIR="."
+          fi
+
+          # Case 2: project is inside the supplied ZIP
+          if [ -z "$PROJECT_DIR" ]; then
+            ZIP_FILE=$(find . -maxdepth 2 -type f -name "*.zip" -print -quit)
+
+            if [ -n "$ZIP_FILE" ]; then
+              echo "ZIP found: $ZIP_FILE"
+
+              rm -rf extracted
+              mkdir -p extracted
+
+              unzip -q "$ZIP_FILE" -d extracted
+
+              echo "=== Extracted contents ==="
+              find extracted -maxdepth 5 -type f | sort
+
+              PROJECT_DIR=$(find extracted \
+                -type f \
+                \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+                -print \
+                -quit | xargs -r dirname)
+            fi
+          fi
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: Android Gradle project was not found."
+            echo "A settings.gradle/settings.gradle.kts file is required."
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "=== Project directory ==="
+          echo "$PROJECT_DIR"
+
+      - name: Configure AndroidX and JVM
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.enableJetifier=true
+          kotlin.code.style=official
+          EOF
+
+          echo "=== gradle.properties ==="
+          cat gradle.properties
+
+      - name: Verify Gradle project
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "=== Project files ==="
+          ls -la
+
+          echo "=== Gradle version ==="
+          gradle --version
+
+          echo "=== Settings ==="
+          cat settings.gradle 2>/dev/null || cat settings.gradle.kts
+
+          echo "=== Root build ==="
+          cat build.gradle 2>/dev/null || cat build.gradle.kts
+
+          echo "=== App build ==="
+          cat app/build.gradle 2>/dev/null || cat app/build.gradle.kts
+
+      - name: Force Java and Kotlin target 17
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          cat >> build.gradle <<'EOF'
+
+          // CI JVM compatibility
+          allprojects {
+              tasks.withType(JavaCompile).configureEach {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+
+              tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+                  kotlinOptions {
+                      jvmTarget = "17"
+                  }
+              }
+          }
+          EOF
+
+      - name: Build Debug APK
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "=== Building APK ==="
+          gradle clean assembleDebug --stacktrace --no-daemon
+
+      - name: Find APK
+        shell: bash
+        run: |
+          set -e
+
+          echo "=== APK files ==="
+          find "$PROJECT_DIR" \
+            -type f \
+            -name "*.apk" \
+            -print
+
+          APK=$(find "$PROJECT_DIR" \
+            -type f \
+            -path "*/build/outputs/apk/debug/*.apk" \
+            -print \
+            -quit)
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not produced."
+            exit 1
+          fi
+
+          echo "APK=$APK" >> "$GITHUB_ENV"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Psyktikos_v1_0_DEBUG_APK
+          path: ${{ env.APK }}
+          if-no-files-found: error
