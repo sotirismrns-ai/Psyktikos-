@@ -1,0 +1,134 @@
+name: build-apk
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Build Psyktikos v1.0 FINAL APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Find Android Gradle project
+        shell: bash
+        run: |
+          set -e
+
+          echo "=== Searching for Android Gradle project ==="
+
+          PROJECT_DIR=""
+
+          while IFS= read -r settings; do
+            dir="$(dirname "$settings")"
+
+            if [ -f "$dir/gradlew" ] && [ -f "$dir/settings.gradle" -o -f "$dir/settings.gradle.kts" ]; then
+              PROJECT_DIR="$dir"
+              break
+            fi
+          done < <(find . -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) -print)
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: Android Gradle project with gradlew was not found."
+            echo "=== Repository tree ==="
+            find . -maxdepth 5 -type f | sort
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "=== Project directory ==="
+          echo "$PROJECT_DIR"
+
+          echo "=== Project files ==="
+          find "$PROJECT_DIR" -maxdepth 4 -type f | sort
+
+      - name: Verify Gradle wrapper
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          test -f gradlew
+          test -f gradle/wrapper/gradle-wrapper.properties
+
+          chmod +x gradlew
+
+          echo "=== Gradle wrapper verified ==="
+          ./gradlew --version
+
+      - name: Configure AndroidX
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          touch gradle.properties
+
+          grep -qxF 'android.useAndroidX=true' gradle.properties || \
+            echo 'android.useAndroidX=true' >> gradle.properties
+
+          grep -qxF 'android.enableJetifier=true' gradle.properties || \
+            echo 'android.enableJetifier=true' >> gradle.properties
+
+          grep -qxF 'org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8' gradle.properties || \
+            echo 'org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8' >> gradle.properties
+
+          echo "=== gradle.properties ==="
+          cat gradle.properties
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          set -e
+
+          cd "$PROJECT_DIR"
+
+          echo "=== Building Psyktikos v1.0 FINAL ==="
+
+          ./gradlew clean assembleDebug --stacktrace --no-daemon
+
+      - name: Locate APK
+        shell: bash
+        run: |
+          set -e
+
+          echo "=== APK files ==="
+
+          find "$PROJECT_DIR/app/build/outputs/apk" \
+            -type f \
+            -name "*.apk" \
+            -print
+
+          APK="$(find "$PROJECT_DIR/app/build/outputs/apk" \
+            -type f \
+            -name "*.apk" \
+            | head -n 1)"
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK was not generated."
+            exit 1
+          fi
+
+          echo "APK_PATH=$APK" >> "$GITHUB_ENV"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Psyktikos-v1.0-FINAL-APK
+          path: ${{ env.APK_PATH }}
+          if-no-files-found: error
