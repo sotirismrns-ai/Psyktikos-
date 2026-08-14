@@ -1,0 +1,592 @@
+name: Build APK - Psyktikos v1.0 FINAL
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    name: Build Psyktikos APK
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      # ============================================================
+      # EXTRACT THE CURRENT PROJECT ZIP
+      # ============================================================
+
+      - name: Extract Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP_FILE="$GITHUB_WORKSPACE/Psyktikos_v1_0_3_CHANGES.zip"
+
+          if [ ! -f "$ZIP_FILE" ]; then
+            echo "ERROR: $ZIP_FILE was not found."
+            echo "Repository contents:"
+            find "$GITHUB_WORKSPACE" \
+              -maxdepth 4 \
+              -type f \
+              -not -path "*/.git/*" \
+              | sort
+            exit 1
+          fi
+
+          mkdir -p "$GITHUB_WORKSPACE/project"
+
+          unzip -q -o "$ZIP_FILE" \
+            -d "$GITHUB_WORKSPACE/project"
+
+          echo "ZIP extracted successfully."
+
+      # ============================================================
+      # LOCATE THE REAL ANDROID PROJECT
+      # ============================================================
+
+      - name: Locate Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT_DIR=""
+
+          while IFS= read -r settings_file; do
+            candidate="$(dirname "$settings_file")"
+
+            if [ -f "$candidate/app/build.gradle" ] || \
+               [ -f "$candidate/app/build.gradle.kts" ]; then
+
+              PROJECT_DIR="$candidate"
+              break
+            fi
+          done < <(
+            find "$GITHUB_WORKSPACE/project" \
+              -type f \
+              \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+              -not -path "*/.git/*" \
+              | sort
+          )
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: Android project was not found after extracting ZIP."
+            echo "Extracted contents:"
+            find "$GITHUB_WORKSPACE/project" \
+              -maxdepth 6 \
+              -type f \
+              -not -path "*/.git/*" \
+              | sort
+            exit 1
+          fi
+
+          echo "Android project found:"
+          echo "$PROJECT_DIR"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      # ============================================================
+      # ANDROIDX
+      # ============================================================
+
+      - name: Enable AndroidX
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FILE="$PROJECT_DIR/gradle.properties"
+
+          if [ -f "$FILE" ]; then
+
+            if grep -q '^android.useAndroidX=' "$FILE"; then
+              sed -i \
+                's/^android.useAndroidX=.*/android.useAndroidX=true/' \
+                "$FILE"
+            else
+              printf '\nandroid.useAndroidX=true\n' >> "$FILE"
+            fi
+
+          else
+            printf 'android.useAndroidX=true\n' > "$FILE"
+          fi
+
+      # ============================================================
+      # JAVA / KOTLIN 17
+      # ============================================================
+
+      - name: Fix Java and Kotlin JVM compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_GRADLE="$PROJECT_DIR/app/build.gradle"
+
+          if [ ! -f "$APP_GRADLE" ]; then
+            echo "ERROR: $APP_GRADLE was not found."
+            exit 1
+          fi
+
+          python3 - "$APP_GRADLE" <<'PY'
+          from pathlib import Path
+          import sys
+          import re
+
+          path = Path(sys.argv[1])
+          text = path.read_text(encoding="utf-8")
+
+          compile_options = """compileOptions {
+              sourceCompatibility JavaVersion.VERSION_17
+              targetCompatibility JavaVersion.VERSION_17
+          }"""
+
+          if re.search(r'\bcompileOptions\s*\{', text):
+              text = re.sub(
+                  r'\bcompileOptions\s*\{.*?\}',
+                  compile_options,
+                  text,
+                  count=1,
+                  flags=re.DOTALL
+              )
+          else:
+              android_match = re.search(r'\bandroid\s*\{', text)
+
+              if not android_match:
+                  raise SystemExit("ERROR: android block was not found.")
+
+              insertion = (
+                  "\n\n    "
+                  + compile_options.replace("\n", "\n    ")
+                  + "\n"
+              )
+
+              text = (
+                  text[:android_match.end()]
+                  + insertion
+                  + text[android_match.end():]
+              )
+
+          kotlin_block = """kotlinOptions {
+              jvmTarget = '17'
+          }"""
+
+          if re.search(r'\bkotlinOptions\s*\{', text):
+              text = re.sub(
+                  r'\bkotlinOptions\s*\{.*?\}',
+                  kotlin_block,
+                  text,
+                  count=1,
+                  flags=re.DOTALL
+              )
+          else:
+              text += """
+
+          tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+              kotlinOptions {
+                  jvmTarget = '17'
+              }
+          }
+          """
+
+          path.write_text(text, encoding="utf-8")
+          PY
+
+      # ============================================================
+      # VERSION CODE
+      # ============================================================
+
+      - name: Set increasing versionCode
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_GRADLE="$PROJECT_DIR/app/build.gradle"
+
+          python3 - "$APP_GRADLE" "$GITHUB_RUN_NUMBER" <<'PY'
+          from pathlib import Path
+          import sys
+          import re
+
+          path = Path(sys.argv[1])
+          run_number = int(sys.argv[2])
+
+          text = path.read_text(encoding="utf-8")
+
+          new_code = 1000 + run_number
+
+          match = re.search(
+              r'(\bversionCode\s+)(\d+)',
+              text
+          )
+
+          if not match:
+              raise SystemExit("ERROR: versionCode was not found.")
+
+          old_code = int(match.group(2))
+
+          text = (
+              text[:match.start(2)]
+              + str(new_code)
+              + text[match.end(2):]
+          )
+
+          path.write_text(text, encoding="utf-8")
+
+          print(f"versionCode: {old_code} -> {new_code}")
+          PY
+
+      # ============================================================
+      # SIGNING KEY
+      # ============================================================
+
+      - name: Restore permanent signing key
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "ERROR: KEYSTORE_BASE64 secret is empty or missing."
+            exit 1
+          fi
+
+          mkdir -p "$RUNNER_TEMP/psyktikos-signing"
+
+          echo "$KEYSTORE_BASE64" | base64 --decode \
+            > "$RUNNER_TEMP/psyktikos-signing/psyktikos-release.jks"
+
+          if [ ! -s "$RUNNER_TEMP/psyktikos-signing/psyktikos-release.jks" ]; then
+            echo "ERROR: Keystore was not created."
+            exit 1
+          fi
+
+          echo "KEYSTORE_FILE=$RUNNER_TEMP/psyktikos-signing/psyktikos-release.jks" \
+            >> "$GITHUB_ENV"
+
+      # ============================================================
+      # CONFIGURE RELEASE SIGNING
+      # ============================================================
+
+      - name: Configure permanent Release signing
+        shell: bash
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          APP_GRADLE="$PROJECT_DIR/app/build.gradle"
+
+          python3 - "$APP_GRADLE" "$KEYSTORE_FILE" "$KEYSTORE_PASSWORD" <<'PY'
+          from pathlib import Path
+          import sys
+          import re
+
+          path = Path(sys.argv[1])
+          keystore_file = sys.argv[2]
+          password = sys.argv[3]
+
+          text = path.read_text(encoding="utf-8")
+
+          if not re.search(r'\bcompileSdk(?:Version)?\s+\d+', text):
+
+              android_match = re.search(
+                  r'\bandroid\s*\{',
+                  text
+              )
+
+              if not android_match:
+                  raise SystemExit("ERROR: android block was not found.")
+
+              text = (
+                  text[:android_match.end()]
+                  + "\n    compileSdkVersion 35\n"
+                  + text[android_match.end():]
+              )
+
+          android_match = re.search(
+              r'\bandroid\s*\{',
+              text
+          )
+
+          if not android_match:
+              raise SystemExit("ERROR: android block was not found.")
+
+          android_open = text.find(
+              "{",
+              android_match.start()
+          )
+
+          depth = 0
+          android_close = None
+
+          for i in range(android_open, len(text)):
+
+              if text[i] == "{":
+                  depth += 1
+
+              elif text[i] == "}":
+                  depth -= 1
+
+                  if depth == 0:
+                      android_close = i
+                      break
+
+          if android_close is None:
+              raise SystemExit(
+                  "ERROR: android block could not be parsed."
+              )
+
+          signing_match = re.search(
+              r'\bsigningConfigs\s*\{',
+              text[android_open:android_close]
+          )
+
+          signing_block = f"""
+              signingConfigs {{
+                  release {{
+                      storeFile file('{keystore_file}')
+                      storePassword '{password}'
+                      keyAlias 'psyktikos'
+                      keyPassword '{password}'
+                  }}
+              }}
+          """
+
+          if not signing_match:
+
+              text = (
+                  text[:android_open + 1]
+                  + signing_block
+                  + "\n"
+                  + text[android_open + 1:]
+              )
+
+          build_match = re.search(
+              r'\bbuildTypes\s*\{',
+              text
+          )
+
+          if not build_match:
+
+              text += """
+
+              android {
+                  buildTypes {
+                      release {
+                          signingConfig signingConfigs.release
+                      }
+                  }
+              }
+              """
+
+          else:
+
+              build_start = build_match.start()
+              build_open = text.find("{", build_start)
+
+              depth = 0
+              build_close = None
+
+              for i in range(build_open, len(text)):
+
+                  if text[i] == "{":
+                      depth += 1
+
+                  elif text[i] == "}":
+                      depth -= 1
+
+                      if depth == 0:
+                          build_close = i
+                          break
+
+              if build_close is None:
+                  raise SystemExit(
+                      "ERROR: buildTypes block could not be parsed."
+                  )
+
+              build_body = text[build_open + 1:build_close]
+
+              release_match = re.search(
+                  r'\brelease\s*\{',
+                  build_body
+              )
+
+              if not release_match:
+
+                  release_block = """
+                      release {
+                          signingConfig signingConfigs.release
+                      }
+                  """
+
+                  text = (
+                      text[:build_open + 1]
+                      + release_block
+                      + text[build_close:]
+                  )
+
+              else:
+
+                  release_start = (
+                      build_open
+                      + 1
+                      + release_match.start()
+                  )
+
+                  release_open = text.find(
+                      "{",
+                      release_start
+                  )
+
+                  depth = 0
+                  release_close = None
+
+                  for i in range(release_open, len(text)):
+
+                      if text[i] == "{":
+                          depth += 1
+
+                      elif text[i] == "}":
+                          depth -= 1
+
+                          if depth == 0:
+                              release_close = i
+                              break
+
+                  if release_close is None:
+                      raise SystemExit(
+                          "ERROR: release block could not be parsed."
+                      )
+
+                  release_body = text[
+                      release_open + 1:release_close
+                  ]
+
+                  if "signingConfig signingConfigs.release" not in release_body:
+
+                      release_body = (
+                          release_body.rstrip()
+                          + "\n"
+                          + "        signingConfig signingConfigs.release\n"
+                          + "    "
+                      )
+
+                      text = (
+                          text[:release_open + 1]
+                          + release_body
+                          + text[release_close:]
+                      )
+
+          path.write_text(text, encoding="utf-8")
+          PY
+
+      # ============================================================
+      # FIND GRADLE
+      # ============================================================
+
+      - name: Detect Gradle wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f "$PROJECT_DIR/gradlew" ]; then
+            chmod +x "$PROJECT_DIR/gradlew"
+            echo "GRADLE_CMD=./gradlew" >> "$GITHUB_ENV"
+          else
+            echo "GRADLE_CMD=gradle" >> "$GITHUB_ENV"
+          fi
+
+      # ============================================================
+      # BUILD
+      # ============================================================
+
+      - name: Build signed Release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          "$GRADLE_CMD" clean assembleRelease --stacktrace
+
+      # ============================================================
+      # VERIFY APK
+      # ============================================================
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK_FILE="$(
+            find "$PROJECT_DIR/app/build/outputs/apk/release" \
+              -type f \
+              -name "*.apk" \
+              | sort \
+              | head -n 1
+          )"
+
+          if [ -z "$APK_FILE" ]; then
+            echo "ERROR: Release APK was not generated."
+            exit 1
+          fi
+
+          echo "APK generated:"
+          echo "$APK_FILE"
+
+          if command -v apksigner >/dev/null 2>&1; then
+            apksigner verify --verbose "$APK_FILE"
+          fi
+
+      # ============================================================
+      # ARTIFACT
+      # ============================================================
+
+      - name: Prepare APK artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK_FILE="$(
+            find "$PROJECT_DIR/app/build/outputs/apk/release" \
+              -type f \
+              -name "*.apk" \
+              | sort \
+              | head -n 1
+          )"
+
+          if [ -z "$APK_FILE" ]; then
+            echo "ERROR: APK was not found."
+            exit 1
+          fi
+
+          rm -rf "$GITHUB_WORKSPACE/apk-output"
+          mkdir -p "$GITHUB_WORKSPACE/apk-output"
+
+          cp "$APK_FILE" \
+            "$GITHUB_WORKSPACE/apk-output/Psyktikos_v1_0_FINAL.apk"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Psyktikos_v1_0_FINAL_APK
+          path: apk-output/Psyktikos_v1_0_FINAL.apk
+          if-no-files-found: error
