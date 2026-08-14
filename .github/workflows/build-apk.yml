@@ -1,0 +1,229 @@
+name: Build APK - Psyktikos v1.0 FINAL
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    name: Build Psyktikos APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Prepare Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT_DIR="$GITHUB_WORKSPACE"
+
+          test -f "$PROJECT_DIR/build.gradle"
+          test -f "$PROJECT_DIR/settings.gradle"
+          test -f "$PROJECT_DIR/MainActivity.kt"
+          test -f "$PROJECT_DIR/AndroidManifest.xml"
+          test -f "$PROJECT_DIR/strings.xml"
+          test -f "$PROJECT_DIR/themes.xml"
+
+          mkdir -p "$PROJECT_DIR/app/src/main/java/com/psyktikos/app"
+          mkdir -p "$PROJECT_DIR/app/src/main/res/values"
+
+          cp "$PROJECT_DIR/build.gradle" \
+             "$PROJECT_DIR/app/build.gradle"
+
+          cp "$PROJECT_DIR/MainActivity.kt" \
+             "$PROJECT_DIR/app/src/main/java/com/psyktikos/app/MainActivity.kt"
+
+          cp "$PROJECT_DIR/AndroidManifest.xml" \
+             "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+
+          cp "$PROJECT_DIR/strings.xml" \
+             "$PROJECT_DIR/app/src/main/res/values/strings.xml"
+
+          cp "$PROJECT_DIR/themes.xml" \
+             "$PROJECT_DIR/app/src/main/res/values/themes.xml"
+
+          cat > "$PROJECT_DIR/build.gradle" <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
+          }
+          EOF
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Fix Java and Kotlin compatibility only
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_GRADLE="$PROJECT_DIR/app/build.gradle"
+
+          python3 - "$APP_GRADLE" <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          text = path.read_text(encoding="utf-8")
+
+          if "compileOptions" not in text:
+              marker = "android {"
+              if marker not in text:
+                  raise SystemExit("ERROR: android block not found.")
+
+              text = text.replace(
+                  marker,
+                  """android {
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                  jvmTarget = "17"
+              }""",
+                  1
+              )
+          elif "kotlinOptions" not in text:
+              android_end = text.rfind("}")
+              if android_end == -1:
+                  raise SystemExit("ERROR: android block closing brace not found.")
+
+              text = text[:android_end] + """
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          """ + text[android_end:]
+
+          path.write_text(text, encoding="utf-8")
+          PY
+
+      - name: Set increasing versionCode
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_GRADLE="$PROJECT_DIR/app/build.gradle"
+
+          python3 - "$APP_GRADLE" "$GITHUB_RUN_NUMBER" <<'PY'
+          from pathlib import Path
+          import sys
+          import re
+
+          path = Path(sys.argv[1])
+          run_number = int(sys.argv[2])
+
+          text = path.read_text(encoding="utf-8")
+
+          new_code = 1000 + run_number
+
+          text, count = re.subn(
+              r'(\bversionCode\s+)\d+',
+              rf'\g<1>{new_code}',
+              text,
+              count=1
+          )
+
+          if count != 1:
+              raise SystemExit("ERROR: versionCode not found.")
+
+          path.write_text(text, encoding="utf-8")
+
+          print(f"versionCode set to {new_code}")
+          PY
+
+      - name: Enable AndroidX
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > "$PROJECT_DIR/gradle.properties" <<'EOF'
+          android.useAndroidX=true
+          android.enableJetifier=true
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          EOF
+
+      - name: Detect Gradle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f "$PROJECT_DIR/gradlew" ]; then
+            chmod +x "$PROJECT_DIR/gradlew"
+            echo "GRADLE_CMD=./gradlew" >> "$GITHUB_ENV"
+          else
+            echo "GRADLE_CMD=gradle" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build Release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          "$GRADLE_CMD" clean assembleRelease --stacktrace
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK_FILE="$(
+            find "$PROJECT_DIR/app/build/outputs/apk/release" \
+              -type f \
+              -name "*.apk" \
+              | sort \
+              | head -n 1
+          )"
+
+          if [ -z "$APK_FILE" ]; then
+            echo "ERROR: Release APK was not generated."
+            exit 1
+          fi
+
+          echo "APK generated: $APK_FILE"
+
+      - name: Prepare APK artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK_FILE="$(
+            find "$PROJECT_DIR/app/build/outputs/apk/release" \
+              -type f \
+              -name "*.apk" \
+              | sort \
+              | head -n 1
+          )"
+
+          rm -rf "$GITHUB_WORKSPACE/apk-output"
+          mkdir -p "$GITHUB_WORKSPACE/apk-output"
+
+          cp "$APK_FILE" \
+             "$GITHUB_WORKSPACE/apk-output/Psyktikos_v1_0_FINAL.apk"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Psyktikos_v1_0_FINAL_APK
+          path: apk-output/Psyktikos_v1_0_FINAL.apk
+          if-no-files-found: error
